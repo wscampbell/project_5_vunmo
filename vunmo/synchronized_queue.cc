@@ -104,7 +104,21 @@ std::size_t synchronized_queue<T>::size() {
 
 template <typename T>
 bool synchronized_queue<T>::pop(T* elt) {
-  // TODO: implement
+
+  pthread_mutex_lock(&(this->mtx));
+
+  // If the queue is empty, pop will wait until an element is pushed onto it
+  while (this->q.empty)
+    pthread_cond_wait(&(this->cv), &(this->mtx));
+
+  // Returns true if queue has been stopped
+  if (this->is_stopped)
+    return true;
+
+  // Pop and set the elt pointer element from the front of the queue and return false
+  elt = this->q.front;
+  this->q.pop();
+  pthread_mutex_unlock(&(this->mtx));
   return false;
 }
 
@@ -122,9 +136,11 @@ std::vector<T> synchronized_queue<T>::flush() {
 
 template <typename T>
 void synchronized_queue<T>::stop() {
-  // set is_stopped to true, and wake up all threads waiting on the cond
-  // variable
-  // TODO: implement
+  // set is_stopped to true
+  this->is_stopped = true;
+
+  // and wake up all threads waiting on the cond variable
+  pthread_cond_broadcast(this->cv)
 }
 
 #endif

@@ -1,4 +1,3 @@
-Will Campbell
 CS 502 Project 5 Alt.
 =====================
 

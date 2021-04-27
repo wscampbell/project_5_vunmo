@@ -104,33 +104,58 @@ std::size_t synchronized_queue<T>::size() {
 
 template <typename T>
 bool synchronized_queue<T>::pop(T* elt) {
-
-  pthread_mutex_lock(&(this->mtx));
+  std::unique_lock<std::mutex> lock(this->mtx);
 
   // If the queue is empty, pop will wait until an element is pushed onto it
-  while (this->q.empty)
-    pthread_cond_wait(&(this->cv), &(this->mtx));
-
+  if (this->q.empty()) {
+    this->cv.wait(lock);
+  }
   // Returns true if queue has been stopped
   if (this->is_stopped)
     return true;
 
   // Pop and set the elt pointer element from the front of the queue and return false
-  elt = this->q.front;
+  *elt = this->q.front();
   this->q.pop();
-  pthread_mutex_unlock(&(this->mtx));
+
+  // Normally the lock must be unlocked, but in C++, this line isn't necessary here, 
+  // because when the unique lock created above is destroyed, it calls unlock. 
+  // It gets destroyed when it goes out of scope, ie when this function returns
+  // this->mtx.unlock();
+
   return false;
 }
 
 template <typename T>
 void synchronized_queue<T>::push(T elt) {
-  // TODO: implement
+
+  this->mtx.lock();
+
+  // Push an element onto the back of the queue
+  this->q.push(elt);
+
+  this->mtx.unlock();
+
+  // If the queue was empty, signal 1 thread which is waiting to pop from the queue
+  if (this->q.size() == 1)
+    this->cv.notify_one();
+
 }
 
 template <typename T>
 std::vector<T> synchronized_queue<T>::flush() {
   std::vector<T> elts;
-  // TODO: implement
+
+  // Remove all elements from the queue and give them to elts
+  this->mtx.lock();
+
+  while (!this->q.empty()) {
+    elts.push_back(this->q.front());
+    this->q.pop();
+  }
+
+  this->mtx.unlock();
+
   return elts;
 }
 
@@ -140,7 +165,9 @@ void synchronized_queue<T>::stop() {
   this->is_stopped = true;
 
   // and wake up all threads waiting on the cond variable
-  pthread_cond_broadcast(this->cv)
+  this->cv.notify_all();
+
+  printf("Queue stopped\n");
 }
 
 #endif

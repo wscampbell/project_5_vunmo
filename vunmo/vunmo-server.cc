@@ -17,6 +17,9 @@ int Server::get_two_accounts(uint64_t first_id, account_t** first_account,
   // happen?). Come up with a way to lock these clients so that you can always
   // avoid deadlocks!
 
+  // The above problem should be solved by locking the mutex to the accounts map
+  // That way only one process can even go in and lock accounts in the first place
+
   return -ECLINOTFOUND;
 }
 
@@ -84,44 +87,94 @@ void Server::accept_clients_loop() {
   // TODO: implement
   // While the server is still running (i.e., `is_stopped` is still false), do
   // the following steps in a loop:
-  // 1. Call `accept_client` and get a pointer to client_conn_t (which contains
-  //    newly accepted client's connection information).
-  // 2. If we already have the new client's ID in `client_conns` map, it means
-  //    that this is a client that is re-connecting with the same ID. Call
-  //    `handle_reconnecting_client` to take care of this case, and go back to
-  //    the beginning of the loop.
-  // 2. Set the `is_connected` field of the the client_conn_t to true, and
-  //    insert the client_conn_t into `client_conns` map.
-  // 3. Create a new account_t for the client. Initialize the ID and balance,
-  //    and insert it into `accounts` map.
+  while (!is_stopped.load()) {
+
+    // 1. Call `accept_client` and get a pointer to client_conn_t (which contains
+    //    newly accepted client's connection information).
+    client_conn_t *newClient = accept_client();
+    if (newClient == NULL){
+      delete newClient;
+      continue;
+    }
+
+    // 2. If we already have the new client's ID in `client_conns` map, it means
+    //    that this is a client that is re-connecting with the same ID. Call
+    //    `handle_reconnecting_client` to take care of this case, and go back to
+    //    the beginning of the loop.
+    client_conns_mtx.lock();
+    if (client_conns.count(newClient->id) == 1) {
+      client_conns_mtx.unlock();
+      handle_reconnecting_client(newClient, client_conns[newClient->id]);
+      continue;
+    }
+    client_conns_mtx.unlock();
+
+    // 2. Set the `is_connected` field of the the client_conn_t to true, and
+    //    insert the client_conn_t into `client_conns` map.
+    newClient->is_connected = true;
+    client_conns_mtx.lock();
+    client_conns.emplace(newClient->id, newClient);
+    client_conns_mtx.unlock();
+
+    // 3. Create a new account_t for the client. Initialize the ID and balance,
+    //    and insert it into `accounts` map.
+    account_t *newAccount = new account_t();
+    newAccount->id = newClient->id;
+    newAccount->balance = 0;
+    accounts_mtx.lock();
+    accounts.insert({newClient->id, newAccount});
+    accounts_mtx.unlock();
+
+  }
+
 }
 
 int Server::start(int port, int n_workers) {
   // TODO: implement
   // 1. Set the server's `is_stopped` field to false.
+  this->is_stopped = false;
 
   // 2. Call `open_listen_socket` to open a listener socket. Make sure the
   //    socket descriptor returned is not -1, and store it in the server's
   //    `listener_fd` field.
+  int listener = open_listen_socket(port);
+  if (listener == -1) {
+    perror("open_listen_socket returned -1\n");
+    return -1;
+  }
+  this->listener_fd = listener;
 
   // 3. Make sure that n_workers is greater than 0, and store n_workers in the
   //    server's `num_workers`, and set its `workers` vector to be a vector of
   //    that size.
   //    You can call vector's resize function, or create a new vector of that
   //    size to do this.
+  //    Note from Will:
+  //    Sizing the workers vector as described above fills it with default threads,
+  //    so this is not advised. Nothing needs to be done to the workers vector, it
+  //    works fine without doing anything with its size.
+  if (n_workers <= 0) {
+    perror("n_workers is less than or equal to 0\n");
+    return -1;
+  }
+  this->num_workers = n_workers;
 
   // 4. Create a pool of workers by spawning `num_workers` number of threads,
   //    each running the `work_loop` function. Store the worker threads in the
   //    `workers` vector. These threads will be joined in `stop()`.
+  for (int i = 0; i < num_workers; i++)
+    workers.push_back(std::thread(&Server::work_loop, this));
 
   // 5. Create a thread that runs `receive_requests_loop` to keep reading
   //    requests from clients.
   //    Store this thread in the server's `request_listener` field. This thread
   //    will be joined in `stop()`.
+  this->request_listener = std::thread(&Server::receive_requests_loop, this);
 
   // 6. Create a thread that runs `accept_clients_loop` to keep accepting client
   //    connections.
   //    Store this thread in the server's `client_listener` field.
+  this->client_listener = std::thread(&Server::accept_clients_loop, this);
 
   return 0;
 }
@@ -129,18 +182,29 @@ int Server::start(int port, int n_workers) {
 std::unordered_map<uint64_t, uint64_t> Server::stop() {
   // TODO: implement
   // 1. Set the server's `is_stopped` field to true.
+  this->is_stopped = true;
 
   // 2. Stop the server from accepting further connections. To do so, call the
   //    `shutdown` system call on the server's `listener_fd` socket descriptor;
   //    and pass `SHUT_RDWR` as the second argument, which shuts the socket down
   //    for reading and writing.
   //    Join the `request_listener` thread.
+  shutdown(this->listener_fd, SHUT_RDWR);
+  this->request_listener.join();
 
   // 3. Stop the work queue. Flush the content of the queue, and free each
   //    request struct (which was heap-allocated when it was created) with the
   //    `delete` keyword.
+  this->work_queue.stop();
+  std::vector<request_t *> flushedRequests = this->work_queue.flush();
+  for (auto request : flushedRequests)
+    delete request;
 
   // 4. Join all workers threads, and join the client listener thread.
+  for (auto& worker : workers){
+    worker.join(); 
+  }
+  this->client_listener.join();
 
   /* NOTE: At this point, server is now in a single-threaded state */
 

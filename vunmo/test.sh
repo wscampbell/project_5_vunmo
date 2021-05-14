@@ -90,7 +90,7 @@ run_test(){
 	  echo "" > "$TMP_STDOUT"
 	  echo "test timed out" > "$TMP_STDERR"
 		# run command, capture stdout, stderr
-		timeout "$TIMEOUT"s "$EXEC" > "$TMP_STDOUT" 2> "$TMP_STDERR"
+		timeout "$TIMEOUT"s "$EXEC" #> "$TMP_STDOUT" 2> "$TMP_STDERR"
 		# capture return code
 		echo $? > "$TMP_RETURN"
 		exit 0

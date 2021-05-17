@@ -1,15 +1,26 @@
 #include "vunmo-server.hh"
 
 int Server::get_account(uint64_t id, account_t** account) {
-  // TODO: implement
+  // lock the accounts map so its contents can't be changed while we're looking
+  accounts_mtx.lock();
+
+  // check if the requested account exists, if it does assign the given pointer to it and return
+  auto acct = accounts.find(id);
+  if (acct != accounts.end()) {
+    *account = acct->second;
+    (*account)->mtx.lock();
+    accounts_mtx.unlock();
+    return 0;
+  }
+
+  // unlock accounts map
+  accounts_mtx.unlock();
 
   return -ECLINOTFOUND;
 }
 
 int Server::get_two_accounts(uint64_t first_id, account_t** first_account,
                              uint64_t second_id, account_t** second_account) {
-  // TODO: implement
-
   // Hint: The order in which you lock clients' accounts matters a lot. For
   // example, if a worker thread is trying lock Client A and then Client B,
   // while a second worker is trying to lock Client B and then Client A, you
@@ -19,6 +30,39 @@ int Server::get_two_accounts(uint64_t first_id, account_t** first_account,
 
   // The above problem should be solved by locking the mutex to the accounts map
   // That way only one process can even go in and lock accounts in the first place
+
+  // confirm client isn't targeting themself
+  if (first_id == second_id)
+    return -ESELFACTION;
+
+  // lock the accounts map so its contents can't be changed while we're looking
+  accounts_mtx.lock();
+
+  // check if the target exists, if not return appropriate error
+  auto target = accounts.find(second_id);
+  if (target == accounts.end()) {
+    accounts_mtx.unlock();
+    return -ETARNOTFOUND;
+  }
+
+  // make sure first account exists
+  auto client = accounts.find(first_id);
+  if (client != accounts.end()) {
+    // grab the first account and give it to the associated pointer
+    *first_account = client->second;
+    (*first_account)->mtx.lock();
+
+    // if we've made it here, we know the target account exists, so grab it too
+    *second_account = target->second;
+    (*second_account)->mtx.lock();
+    accounts_mtx.unlock();
+
+    // successfully found both accounts, so return 0
+    return 0;
+  }
+
+  // unlock accounts map
+  accounts_mtx.unlock();
 
   return -ECLINOTFOUND;
 }
@@ -41,6 +85,17 @@ int Server::process_request(request_t* req) {
   //      - Error check the return value of `get_account` or `get_two_accounts`,
   //        whichever you called above. If there is error, call
   //        `handle_missing_clients` and return the error value.
+  int getAcctReturn = 0;
+  if (req->type > 2)
+    getAcctReturn = get_two_accounts(req->origin_client_id, &first_account, req->target_client_id, &second_account);
+
+  else
+    getAcctReturn = get_account(req->origin_client_id, &first_account);
+
+  if (getAcctReturn < 0){
+    handle_missing_clients(getAcctReturn, req);
+    return getAcctReturn;
+  }
 
   // 2. Call appropriate request handler.
   //      - Depending on the type of request, call `handle_balance`,
@@ -51,14 +106,43 @@ int Server::process_request(request_t* req) {
   //      - These handlers will fill appropriate messages in the response_t (and
   //        notification_t) you pass in, so you don't have to worry about that
   //        detail :)
+  int handleReturn = 0;
+  switch (req->type) {
+    case 0:
+      handleReturn = handle_balance(req, first_account, &resp);
+      break;
+    case 1:
+      handleReturn = handle_deposit(req, first_account, &resp);
+      break;
+    case 2:
+      handleReturn = handle_withdraw(req, first_account, &resp);
+      break;
+    case 3:
+      handleReturn = handle_pay(req, first_account, second_account, &resp, &target_notification);
+      break;
+    case 4:
+      handleReturn = handle_charge(req, first_account, second_account, &resp, &target_notification);
+      break;
+    default:
+      handleReturn = handle_unknown_request(req, &resp);
+  }
+
+  if (handleReturn < 0){
+    printf("Handle request encountered an error\n");
+  }
 
   // 3. Send the response_t to client who issued the request by calling
   // `send_response`.
+  send_response(req->origin_client_id, &resp);
 
   // 4. If necessary, send the notification_t to target client by calling
   // `send_notification`.
+  send_notification(req->target_client_id, &target_notification);
 
   // 5. Unlock client account(s).
+  first_account->mtx.unlock();
+  if (req->type > 2)
+    second_account->mtx.unlock();
 
   return 0;
 }
@@ -70,6 +154,14 @@ void Server::receive_requests_loop() {
   // While the server is still running (i.e., `is_stopped` is still false), keep
   // calling `fetch_requests` in a loop to fetch requests from clients. Add them
   // to the server's work queue.
+  while (!is_stopped) {
+
+    std::vector<request_t *> newReqs = fetch_requests();
+
+    for (auto& req : newReqs)
+      work_queue.push(req);
+
+  }
 }
 
 void Server::work_loop() {
@@ -81,6 +173,19 @@ void Server::work_loop() {
   //        stopped), simply return.
   //      - Free the request struct with the `delete` keyword since the struct
   //        was heap allocated.
+  while (!is_stopped) {
+
+    request_t *currReq = new request_t();
+    bool popReturn = work_queue.pop(&currReq);
+
+    if (popReturn || currReq == NULL)
+      return;
+
+    process_request(currReq);
+
+    delete currReq;
+
+  }
 }
 
 void Server::accept_clients_loop() {
@@ -500,7 +605,7 @@ void print_request(request_t* req) {
 /* ======================== */
 
 int handle_balance(request_t* req, account_t* account, response_t* resp) {
-  assert(req->origin_client_id ==
+  assert(req->origin_client_id == 
          account->id);  // suppress un-used param warning
   resp->amount = account->balance;
   resp->success = 1;
